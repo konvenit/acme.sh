@@ -48,8 +48,6 @@ LOCAL_ANY_ADDRESS="0.0.0.0"
 
 DEFAULT_RENEW=60
 
-DEFAULT_DNS_SLEEP=120
-
 NO_VALUE="no"
 
 W_DNS="dns"
@@ -846,6 +844,14 @@ _json_encode() {
   _debug3 "_json_encode"
   _debug3 "_j_str" "$_j_str"
   echo "$_j_str" | _hex_dump | _lower_case | sed 's/0a/5c 6e/g' | tr -d ' ' | _h2b | tr -d "\r\n"
+}
+
+#from: http:\/\/  to http://
+_json_decode() {
+  _j_str="$(sed 's#\\/#/#g')"
+  _debug3 "_json_decode"
+  _debug3 "_j_str" "$_j_str"
+  echo "$_j_str"
 }
 
 #options file
@@ -3419,13 +3425,13 @@ _regAccount() {
   if [ "$ACME_VERSION" = "2" ]; then
     regjson='{"termsOfServiceAgreed": true}'
     if [ "$ACCOUNT_EMAIL" ]; then
-      regjson='{"contact": ["mailto: '$ACCOUNT_EMAIL'"], "termsOfServiceAgreed": true}'
+      regjson='{"contact": ["mailto:'$ACCOUNT_EMAIL'"], "termsOfServiceAgreed": true}'
     fi
   else
     _reg_res="$ACME_NEW_ACCOUNT_RES"
     regjson='{"resource": "'$_reg_res'", "terms-of-service-agreed": true, "agreement": "'$ACME_AGREEMENT'"}'
     if [ "$ACCOUNT_EMAIL" ]; then
-      regjson='{"resource": "'$_reg_res'", "contact": ["mailto: '$ACCOUNT_EMAIL'"], "terms-of-service-agreed": true, "agreement": "'$ACME_AGREEMENT'"}'
+      regjson='{"resource": "'$_reg_res'", "contact": ["mailto:'$ACCOUNT_EMAIL'"], "terms-of-service-agreed": true, "agreement": "'$ACME_AGREEMENT'"}'
     fi
   fi
 
@@ -3505,7 +3511,7 @@ updateaccount() {
 
   if [ "$ACME_VERSION" = "2" ]; then
     if [ "$ACCOUNT_EMAIL" ]; then
-      updjson='{"contact": ["mailto: '$ACCOUNT_EMAIL'"]}'
+      updjson='{"contact": ["mailto:'$ACCOUNT_EMAIL'"]}'
     fi
   else
     # ACMEv1: Updates happen the same way a registration is done.
@@ -3518,6 +3524,7 @@ updateaccount() {
   _send_signed_request "$_accUri" "$updjson"
 
   if [ "$code" = '200' ]; then
+    echo "$response" >"$ACCOUNT_JSON_PATH"
     _info "account update success for $_accUri."
   else
     _info "Error. The account was not updated."
@@ -4020,7 +4027,7 @@ issue() {
       #for dns manual mode
       _savedomainconf "Le_OrderFinalize" "$Le_OrderFinalize"
 
-      _authorizations_seg="$(echo "$response" | _egrep_o '"authorizations" *: *\[[^\]*\]' | cut -d '[' -f 2 | tr -d ']' | tr -d '"')"
+      _authorizations_seg="$(echo "$response" | _json_decode | _egrep_o '"authorizations" *: *\[[^\[]*\]' | cut -d '[' -f 2 | tr -d ']' | tr -d '"')"
       _debug2 _authorizations_seg "$_authorizations_seg"
       if [ -z "$_authorizations_seg" ]; then
         _err "_authorizations_seg not found."
@@ -4541,7 +4548,7 @@ $_authorizations_map"
     _savedomainconf "Le_LinkOrder" "$Le_LinkOrder"
 
     _link_cert_retry=0
-    _MAX_CERT_RETRY=5
+    _MAX_CERT_RETRY=30
     while [ "$_link_cert_retry" -lt "$_MAX_CERT_RETRY" ]; do
       if _contains "$response" "\"status\":\"valid\""; then
         _debug "Order status is valid."
@@ -6223,7 +6230,7 @@ Parameters:
   --stateless                       Use stateless mode, see: $_STATELESS_WIKI
   --apache                          Use apache mode.
   --dns [dns_cf|dns_dp|dns_cx|/path/to/api/file]   Use dns mode or dns api.
-  --dnssleep  [$DEFAULT_DNS_SLEEP]                  The time in seconds to wait for all the txt records to take effect in dns api mode. Default $DEFAULT_DNS_SLEEP seconds.
+  --dnssleep   300                  The time in seconds to wait for all the txt records to take effect in dns api mode. It's not necessary to use this by default, $PROJECT_NAME polls dns status automatically.
 
   --keylength, -k [2048]            Specifies the domain key length: 2048, 3072, 4096, 8192 or ec-256, ec-384, ec-521.
   --accountkeylength, -ak [2048]    Specifies the account key length: 2048, 3072, 4096
@@ -6318,7 +6325,7 @@ _installOnline() {
     if ./$PROJECT_ENTRY install "$_nocron" "" "$_noprofile"; then
       _info "Install success!"
       _initpath
-      _saveaccountconf "UPGRADE_HASH" "$(_getMasterHash)"
+      _saveaccountconf "UPGRADE_HASH" "$(_getUpgradeHash)"
     fi
 
     cd ..
@@ -6328,19 +6335,27 @@ _installOnline() {
   )
 }
 
-_getMasterHash() {
+_getRepoHash() {
+  _hash_path=$1
+  shift
+  _hash_url="https://api.github.com/repos/acmesh-official/$PROJECT_NAME/git/refs/$_hash_path"
+  _get $_hash_url | tr -d "\r\n" | tr '{},' '\n' | grep '"sha":' | cut -d '"' -f 4
+}
+
+_getUpgradeHash() {
   _b="$BRANCH"
   if [ -z "$_b" ]; then
     _b="master"
   fi
-  _hash_url="https://api.github.com/repos/acmesh-official/$PROJECT_NAME/git/refs/heads/$_b"
-  _get $_hash_url | tr -d "\r\n" | tr '{},' '\n' | grep '"sha":' | cut -d '"' -f 4
+  _hash=$(_getRepoHash "heads/$_b")
+  if [ -z "$_hash" ]; then _hash=$(_getRepoHash "tags/$_b"); fi
+  echo $_hash
 }
 
 upgrade() {
   if (
     _initpath
-    [ -z "$FORCE" ] && [ "$(_getMasterHash)" = "$(_readaccountconf "UPGRADE_HASH")" ] && _info "Already uptodate!" && exit 0
+    [ -z "$FORCE" ] && [ "$(_getUpgradeHash)" = "$(_readaccountconf "UPGRADE_HASH")" ] && _info "Already uptodate!" && exit 0
     export LE_WORKING_DIR
     cd "$LE_WORKING_DIR"
     _installOnline "nocron" "noprofile"
